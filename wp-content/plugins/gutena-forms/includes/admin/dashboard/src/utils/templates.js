@@ -1,0 +1,55 @@
+/**
+ * Dashboard screen template mappings (settings and main pages).
+ *
+ * @since 1.7.0
+ * @package Gutena Forms
+ */
+
+import GutenaFormsManageTags from '../screens/gutena-forms-manage-tags';
+import GutenaFormsManageStatus from '../screens/gutena-forms-manage-status';
+import GutenaFormsUserAccess from '../screens/gutena-forms-user-access';
+import GutenaFormsIntegrations from '../screens/gutena-forms-integrations'
+import { applyFilters } from '@wordpress/hooks';
+import GutenaFormsMcp from "../screens/gutena-forms-mcp";
+import GutenaFormsImport from '../screens/gutena-forms-import';
+import GutenaFormsExport from '../screens/gutena-forms-export';
+import GutenaFormsRestApi from "../screens/gutena-forms-rest-api";
+
+/**
+ * React components for settings sub-screens (pro: tags, status, user access).
+ *
+ * @since 1.7.0
+ * @type {Object.<string, React.ComponentType>}
+ */
+export const SettingsTemplates = {
+	'manage-tags': GutenaFormsManageTags,
+	'manage-status': GutenaFormsManageStatus,
+	'user-access': GutenaFormsUserAccess,
+	'integrations': GutenaFormsIntegrations,
+	'mcp': GutenaFormsMcp,
+	'import': GutenaFormsImport,
+	'export': GutenaFormsExport,
+	'rest-api': GutenaFormsRestApi,
+	...applyFilters( 'gutena-forms.components', {} )
+};
+
+import GutenaFormsForms from '../screens/gutena-forms-forms';
+import GutenaFormsEntries from '../screens/gutena-forms-entries';
+
+/**
+ * React components for main dashboard pages (forms list, entries list).
+ *
+ * @since 1.7.0
+ * @type {Object.<string, React.ComponentType>}
+ */
+export const PageTemplates = {
+	'forms': GutenaFormsForms,
+	'entries': GutenaFormsEntries,
+};
+
+import MCPConfigurationTemplate from "../components/mcp-configuration-template";
+
+export const FieldTemplates = {
+	'mcp-configuration': MCPConfigurationTemplate,
+	'rest-api-info': GutenaFormsRestApi,
+};

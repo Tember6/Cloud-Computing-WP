@@ -1,0 +1,1447 @@
+import { __ } from '@wordpress/i18n';
+import { get } from 'lodash';
+import { useEffect } from '@wordpress/element';
+import {
+	gfIsEmpty,
+	getInnerBlocksbyNameAttr,
+} from '../../shared/utils/helper';
+import {
+	InspectorControls,
+	__experimentalBlockVariationPicker,
+	InnerBlocks,
+	useBlockProps,
+	store as blockEditorStore,
+	LineHeightControl,
+	PanelColorSettings,
+	FontSizePicker,
+	__experimentalFontFamilyControl as FontFamilyControl,
+	useSettings,
+} from '@wordpress/block-editor';
+import { store as editorStore } from '@wordpress/editor';
+import { useDispatch, useSelect } from '@wordpress/data';
+import {
+	PanelBody,
+	PanelRow,
+	TextControl,
+	ToggleControl,
+	RangeControl,
+	__experimentalToolsPanel as ToolsPanel,
+	__experimentalToolsPanelItem as ToolsPanelItem,
+} from '@wordpress/components';
+import {
+	createBlocksFromInnerBlocksTemplate,
+	store as blocksStore,
+} from '@wordpress/blocks';
+import { applyFilters } from '@wordpress/hooks';
+import RangeControlUnit from '../../shared/components/RangeControlUnit';
+import './editor.scss';
+import variations from './variations';
+import GoogleRecaptchaSettings from './settings/google-recaptcha-settings';
+import CloudflareSettings from './settings/cloudflare-settings';
+import HoneypotSettings from './settings/honeypot-settings';
+import ValidationMessagesSettings from './settings/validation-messages-settings';
+import {
+	buildFormConfirmationFromDefaults,
+	hasExistingFormConfirmationSettings,
+	isFormConfirmationExplicitlyDisabled,
+	persistFormConfirmation,
+} from './settings/form-confirmation-utils';
+import EmailNotificationsSettings from './settings/email-notifications-settings';
+import FormConfirmationSettings from './settings/form-confirmation-settings';
+import { FormConfirmationEditorContext } from './settings/form-confirmation-editor-context';
+import { useFormConfirmationModal } from './settings/use-form-confirmation-modal';
+import {
+	buildTextFieldOptions,
+	collectFormFields,
+} from './settings/email-notifications-form-fields';
+
+/** Hook that retrieves the given setting for the block instance in use.
+ * https://developer.wordpress.org/block-editor/reference-guides/packages/packages-block-editor/#usesetting
+ */
+
+const Placeholder = ( { clientId, name, setAttributes } ) => {
+	const { blockType, defaultVariation, variations } = useSelect(
+		( select ) => {
+			const {
+				getBlockVariations,
+				getBlockType,
+				getDefaultBlockVariation,
+			} = select( blocksStore );
+
+			return {
+				blockType: getBlockType( name ),
+				defaultVariation: getDefaultBlockVariation( name, 'block' ),
+				variations: getBlockVariations( name, 'block' ),
+			};
+		},
+		[ name ]
+	);
+	const { replaceInnerBlocks } = useDispatch( blockEditorStore );
+	const blockProps = useBlockProps();
+
+	// renaming the button from skip to 'Use Default'
+	useEffect( () => {
+		const skipButton = document.querySelector(
+			'.wp-block-gutena-forms .block-editor-block-variation-picker__skip'
+		);
+
+		if ( skipButton ) {
+			const textNode = Array.from( skipButton.childNodes ).find(
+				( node ) => {
+					return (
+						node.nodeType === Node.TEXT_NODE ||
+						( node.nodeType === Node.ELEMENT_NODE &&
+							node.textContent?.trim() === 'Skip' )
+					);
+				}
+			);
+
+			if ( textNode ) {
+				if ( textNode.nodeType === Node.TEXT_NODE ) {
+					textNode.textContent = textNode.textContent.replace(
+						'Skip',
+						__( 'Continue with default', 'gutena-forms' )
+					);
+				} else {
+					textNode.textContent = __(
+						'Continue with default',
+						'gutena-forms'
+					);
+				}
+			} else {
+				const skipText = skipButton.textContent;
+				if ( skipText.includes( 'Skip' ) ) {
+					skipButton.textContent = skipText.replace(
+						'Skip',
+						__( 'Continue with default', 'gutena-forms' )
+					);
+				}
+			}
+		}
+	}, [ variations ] );
+
+	return (
+		<div { ...blockProps }>
+			<__experimentalBlockVariationPicker
+				icon={ get( blockType, [ 'icon', 'src' ] ) }
+				label={ get( blockType, [ 'title' ] ) }
+				variations={ variations }
+				onSelect={ ( nextVariation = defaultVariation ) => {
+					if ( nextVariation.attributes ) {
+						setAttributes( nextVariation.attributes );
+					}
+					if ( nextVariation.innerBlocks ) {
+						replaceInnerBlocks(
+							clientId,
+							createBlocksFromInnerBlocksTemplate(
+								nextVariation.innerBlocks
+							),
+							true
+						);
+					}
+				} }
+				allowSkip
+			/>
+		</div>
+	);
+};
+
+export default function Edit( props ) {
+	//props
+	const { attributes, setAttributes, clientId } = props;
+
+	//Attributes
+	const {
+		formID,
+		formName,
+		formClasses,
+		showLabel,
+		inputLabelGap,
+		inputBgColor,
+		inputBorderWidth,
+		inputBorderRadius,
+		inputBorderColor,
+		inputFocusBorderColor,
+		inputBottomBorderOnly,
+		labelTypography,
+		labelColor,
+		placeholderTypography,
+		placeholderColor,
+		afterSubmitAction,
+		afterSubmitHide,
+		redirectUrl,
+		emailFromName,
+		adminEmails,
+		replyToEmail,
+		replyToName,
+		replyToLastName,
+		adminEmailSubject,
+		emailNotifyAdmin,
+		adminEmailTemplate,
+		messages = {},
+		settings = {},
+		formStyle,
+		style,
+		recaptcha,
+		cloudflareTurnstile,
+		honeypot,
+	} = attributes;
+
+	const { getBlock } = useSelect( blockEditorStore );
+
+	const innerBlocks = useSelect(
+		( select ) => select( blockEditorStore ).getBlock( clientId )?.innerBlocks || [],
+		[ clientId ]
+	);
+
+	const { updateBlockAttributes } = useDispatch( blockEditorStore );
+
+	const MESSAGE_BLOCK_NAMES = [
+		'gutena/form-confirm-msg',
+		'gutena/form-error-msg',
+	];
+
+	useEffect( () => {
+		innerBlocks.forEach( ( block ) => {
+			if ( ! MESSAGE_BLOCK_NAMES.includes( block.name ) ) {
+				return;
+			}
+
+			const lock = block.attributes?.lock;
+
+			if ( ! lock ) {
+				return;
+			}
+
+			if ( true === lock.move || true === lock.remove ) {
+				updateBlockAttributes( block.clientId, {
+					lock: { move: false, remove: false },
+				} );
+			}
+		} );
+	}, [ innerBlocks, updateBlockAttributes ] );
+
+	const isGutenaFormsPostType =
+		'1' === gutenaFormsBlock.is_gutena_forms_post_type ||
+		1 === gutenaFormsBlock.is_gutena_forms_post_type;
+
+	const editedPostTitle = useSelect(
+		( select ) => {
+			if ( ! isGutenaFormsPostType ) {
+				return null;
+			}
+			return select( editorStore ).getEditedPostAttribute( 'title' );
+		},
+		[ isGutenaFormsPostType ]
+	);
+
+	// Form CPT hides the Form name control; keep block formName aligned with the post title.
+	useEffect( () => {
+		if ( ! isGutenaFormsPostType || null === editedPostTitle ) {
+			return;
+		}
+
+		const trimmedTitle = ( editedPostTitle || '' ).trim();
+		if ( '' === trimmedTitle || 'Auto Draft' === trimmedTitle ) {
+			return;
+		}
+
+		const currentFormName = ( formName || '' ).trim();
+		const shouldSync =
+			'' === currentFormName ||
+			'untitled' === currentFormName.toLowerCase() ||
+			currentFormName !== trimmedTitle;
+
+		if ( shouldSync && currentFormName !== trimmedTitle ) {
+			setAttributes( { formName: trimmedTitle } );
+		}
+	}, [ editedPostTitle, formName, isGutenaFormsPostType, setAttributes ] );
+
+	const formFields = collectFormFields( innerBlocks );
+	const textFieldOptions = buildTextFieldOptions( innerBlocks );
+
+	/**
+	 * Returns an array of font family names from a given object.
+	 * Supports the legacy format of theme and custom properties, as well as the new format of a single array.
+	 *
+	 * @param {Object} fontFamilies - An object containing the font families.
+	 * @return {Array} An array of font family names.
+	 */
+	const getFontFamiliesList = ( fontFamilies ) => {
+		if ( gfIsEmpty( fontFamilies ) ) {
+			return [];
+		}
+
+		if ( ! Array.isArray( fontFamilies ) ) {
+			/** https://github.com/WordPress/gutenberg/pull/59846 **/
+			const { theme, custom } = fontFamilies;
+			fontFamilies = theme !== undefined ? theme : [];
+			if ( custom !== undefined ) {
+				fontFamilies = [ ...fontFamilies, ...custom ];
+			}
+		}
+
+		if ( gfIsEmpty( fontFamilies ) || 0 === fontFamilies.length ) {
+			return [];
+		}
+
+		return fontFamilies;
+	};
+
+	const [ fontFamilies ] = useSettings( 'typography.fontFamilies' );
+	const fontFamiliesList = getFontFamiliesList( fontFamilies );
+	const hasfontFamilies = 0 < fontFamiliesList.length;
+
+	const getEmailFields = () => {
+		let emailOptions = [
+			{ label: __( 'Select', 'gutena-forms' ), value: '' },
+		];
+		const blocks = getBlock( clientId );
+		if ( ! gfIsEmpty( blocks ) ) {
+			let emailFields = getInnerBlocksbyNameAttr(
+				blocks.innerBlocks,
+				'gutena/form-field',
+				'fieldType',
+				'email'
+			);
+			let standaloneEmailFields = getInnerBlocksbyNameAttr(
+				blocks.innerBlocks,
+				'gutena/email-field'
+			);
+			if ( ! gfIsEmpty( standaloneEmailFields ) ) {
+				emailFields = [ ...emailFields, ...standaloneEmailFields ];
+			}
+			if ( 0 < emailFields.length ) {
+				for ( let i = 0; i < emailFields.length; i++ ) {
+					let emailAttr = emailFields[ i ].attributes;
+					const isStandaloneEmail =
+						'gutena/email-field' === emailFields[ i ].name;
+					if (
+						! gfIsEmpty( emailAttr.nameAttr ) &&
+						( isStandaloneEmail || 'email' === emailAttr.fieldType )
+					) {
+						emailOptions.push( {
+							label: emailAttr.fieldName,
+							value: emailAttr.nameAttr,
+						} );
+					}
+				}
+			}
+		}
+		return emailOptions;
+	};
+
+	const getTextFields = () => {
+		let textOptions = [
+			{ label: __( 'Select', 'gutena-forms' ), value: '' },
+		];
+		const blocks = getBlock( clientId );
+		if ( ! gfIsEmpty( blocks ) ) {
+			let textFields = getInnerBlocksbyNameAttr(
+				blocks.innerBlocks,
+				'gutena/form-field',
+				'fieldType',
+				'text'
+			);
+			let standaloneTextFields = getInnerBlocksbyNameAttr(
+				blocks.innerBlocks,
+				'gutena/text-field'
+			);
+			if ( ! gfIsEmpty( standaloneTextFields ) ) {
+				textFields = [ ...textFields, ...standaloneTextFields ];
+			}
+			if ( 0 < textFields.length ) {
+				for ( let i = 0; i < textFields.length; i++ ) {
+					let fieldAttr = textFields[ i ].attributes;
+					if (
+						! gfIsEmpty( fieldAttr.nameAttr ) &&
+						( 'text' === fieldAttr.fieldType ||
+							gfIsEmpty( fieldAttr.fieldType ) )
+					) {
+						textOptions.push( {
+							label: fieldAttr.fieldName,
+							value: fieldAttr.nameAttr,
+						} );
+					}
+				}
+			}
+		}
+		return textOptions;
+	};
+
+	//Set Form ID
+	useEffect( () => {
+		let shouldRunFormID = true;
+		//set formID
+		if ( shouldRunFormID && gfIsEmpty( formID ) ) {
+			const d = new Date();
+			let randomID = Math.random().toString( 16 ).slice( 5 );
+
+			/* \W is the equivalent of [^0-9a-zA-Z_] - it includes the underscore character */
+			randomID = randomID.replace( /\W/g, '' );
+
+			let GutenaFormsID =
+				'gutena_forms_ID_' +
+				randomID +
+				'_' +
+				d.getDate() +
+				'' +
+				( d.getMonth() + 1 ) +
+				'' +
+				d.getFullYear() +
+				'' +
+				d.getHours() +
+				'' +
+				d.getMinutes() +
+				'' +
+				d.getSeconds();
+
+			setAttributes( { formID: GutenaFormsID } );
+
+			if ( ! gfIsEmpty( recaptcha ) && gfIsEmpty( recaptcha.secret_key ) && ! gfIsEmpty( gutenaFormsBlock ) && ! gfIsEmpty( gutenaFormsBlock.grecaptcha ) ) {
+				setAttributes( {
+					recaptcha: {
+						enable: gutenaFormsBlock.grecaptcha.enable,
+						type: gutenaFormsBlock.grecaptcha.type,
+						v2_site_key: gutenaFormsBlock.grecaptcha.v2_site_key,
+						v3_site_key: gutenaFormsBlock.grecaptcha.v3_site_key,
+						defaultSettings: true,
+					},
+				} );
+			}
+
+			if ( ! gfIsEmpty( cloudflareTurnstile ) && gfIsEmpty( cloudflareTurnstile.site_key ) && ! gfIsEmpty( gutenaFormsBlock ) && ! gfIsEmpty( gutenaFormsBlock?.cloudflare_turnstile_defaults ) ) {
+				const cloudflare_turnstile_defaults = gutenaFormsBlock.cloudflare_turnstile_defaults;
+				if ( ! gfIsEmpty( cloudflare_turnstile_defaults.site_key ) ) {
+					setAttributes( {
+						cloudflareTurnstile: {
+							enable: cloudflare_turnstile_defaults.enable,
+							site_key: cloudflare_turnstile_defaults.site_key,
+							defaultSettings: true,
+						},
+					} );
+				}
+			}
+
+			if ( ! gfIsEmpty( honeypot ) && ! gfIsEmpty( gutenaFormsBlock ) && ! gfIsEmpty( gutenaFormsBlock.honeypot ) ) {
+				const honeypot_defaults = gutenaFormsBlock.honeypot;
+				if ( ! gfIsEmpty( honeypot_defaults.timeCheckValue ) ) {
+					setAttributes( {
+						honeypot: {
+							enable: honeypot_defaults.enable,
+							timeCheckValue: honeypot_defaults.timeCheckValue,
+							defaultSettings: true,
+						},
+					} );
+				}
+			}
+
+			const messageKeys = [
+				'required_msg',
+				'required_msg_select',
+				'required_msg_check',
+				'required_msg_optin',
+				'invalid_email_msg',
+				'min_value_msg',
+				'max_value_msg',
+			];
+			const hasModernMessages = ! gfIsEmpty( messages ) && messageKeys.some( ( k ) => k in messages );
+			if ( ! hasModernMessages && ! gfIsEmpty( gutenaFormsBlock ) ) {
+				const initMessages = { defaultSettings: true };
+				messageKeys.forEach( ( k ) => {
+					initMessages[ k ] = gutenaFormsBlock?.[ k ] || '';
+				} );
+				setAttributes( { messages: initMessages } );
+			}
+
+			if ( ! gfIsEmpty( gutenaFormsBlock ) && ! gfIsEmpty( gutenaFormsBlock.email_notifications_defaults ) ) {
+				const emailDefaults = gutenaFormsBlock.email_notifications_defaults;
+				const existingEmail = settings?.emailNotifications || {};
+
+				if ( false !== existingEmail.defaultSettings ) {
+					const nextSettings = { ...settings };
+					nextSettings.emailNotifications = {
+						...existingEmail,
+						defaultSettings: true,
+						from_email: emailDefaults.from_email || '',
+						cc: emailDefaults.cc || '',
+						bcc: emailDefaults.bcc || '',
+						reply_to: emailDefaults.reply_to || '',
+					};
+
+					setAttributes( {
+						settings: nextSettings,
+					} );
+				}
+			}
+
+			const storedConfirmation = settings?.formConfirmation || {};
+
+			if (
+				! gfIsEmpty( gutenaFormsBlock ) &&
+				! gfIsEmpty( gutenaFormsBlock.form_confirmation_defaults ) &&
+				! hasExistingFormConfirmationSettings( settings )
+			) {
+				const builtConfirmation = buildFormConfirmationFromDefaults(
+					gutenaFormsBlock.form_confirmation_defaults
+				);
+				const formConfirmation = {
+					enabled: true,
+					defaultSettings: true,
+					hasSavedConfig: false,
+					confirmationType: builtConfirmation.confirmationType,
+					afterSubmit: builtConfirmation.afterSubmit,
+					redirectType: builtConfirmation.redirectType,
+					redirectPageId: builtConfirmation.redirectPageId,
+					redirectUrl: builtConfirmation.redirectUrl,
+					resolvedRedirectUrl: builtConfirmation.resolvedRedirectUrl,
+				};
+
+				persistFormConfirmation(
+					setAttributes,
+					settings,
+					formConfirmation,
+					{ syncLegacy: true }
+				);
+			} else if (
+				! isFormConfirmationExplicitlyDisabled( storedConfirmation )
+			) {
+				const confirmationDefaults =
+					gutenaFormsBlock?.form_confirmation_defaults || {};
+				const builtConfirmation =
+					buildFormConfirmationFromDefaults( confirmationDefaults );
+				const usesGlobalDefaults =
+					storedConfirmation.defaultSettings !== false;
+				const shouldEnable =
+					true !== storedConfirmation.enabled;
+				const shouldNormalizeStored =
+					shouldEnable ||
+					( usesGlobalDefaults &&
+						( storedConfirmation.successMessage ||
+							storedConfirmation.errorMessage ) ) ||
+					( ! usesGlobalDefaults &&
+						( ! String( storedConfirmation.successMessage || '' ).trim() ||
+							! String(
+								storedConfirmation.errorMessage || ''
+							).trim() ) );
+
+				if ( shouldNormalizeStored ) {
+					let nextConfirmation = {
+						...storedConfirmation,
+						enabled: true,
+						defaultSettings:
+							storedConfirmation.defaultSettings ?? true,
+					};
+
+					if ( usesGlobalDefaults ) {
+						nextConfirmation = {
+							...nextConfirmation,
+							confirmationType: builtConfirmation.confirmationType,
+							afterSubmit: builtConfirmation.afterSubmit,
+							redirectType: builtConfirmation.redirectType,
+							redirectPageId: builtConfirmation.redirectPageId,
+							redirectUrl: builtConfirmation.redirectUrl,
+							resolvedRedirectUrl:
+								builtConfirmation.resolvedRedirectUrl,
+						};
+					} else {
+						nextConfirmation = {
+							...builtConfirmation,
+							...storedConfirmation,
+							enabled: true,
+							defaultSettings: false,
+						};
+
+						if (
+							! String(
+								nextConfirmation.successMessage || ''
+							).trim()
+						) {
+							nextConfirmation.successMessage =
+								builtConfirmation.successMessage;
+						}
+
+						if (
+							! String( nextConfirmation.errorMessage || '' ).trim()
+						) {
+							nextConfirmation.errorMessage =
+								builtConfirmation.errorMessage;
+						}
+					}
+
+					persistFormConfirmation(
+						setAttributes,
+						settings,
+						nextConfirmation,
+						{ syncLegacy: true }
+					);
+				}
+			}
+		}
+		//set replyToEmailID
+		if (
+			shouldRunFormID &&
+			gfIsEmpty( replyToEmail ) &&
+			gfIsEmpty( replyToName )
+		) {
+			let emailOptions = getEmailFields();
+			let textOptions = getTextFields();
+			if (
+				1 < emailOptions.length &&
+				! gfIsEmpty( emailOptions[ 1 ].value ) &&
+				1 < textOptions.length &&
+				! gfIsEmpty( textOptions[ 1 ].value )
+			) {
+				setAttributes( {
+					replyToEmail: emailOptions[ 1 ].value,
+					replyToName: textOptions[ 1 ].value,
+				} );
+			}
+		}
+
+		//cleanup
+		return () => {
+			shouldRunFormID = false;
+		};
+	}, [] );
+
+	//Check Inner Blocks
+	const hasInnerBlocks = useSelect(
+		( select ) =>
+			select( blockEditorStore ).getBlocks( clientId ).length > 0,
+		[ clientId ]
+	);
+
+	//Check if existing forms block is present
+	const hasExistingFormsBlock = useSelect(
+		( select ) => {
+			const blocks = select( blockEditorStore ).getBlocks( clientId );
+			if ( gfIsEmpty( blocks ) || 0 === blocks.length ) {
+				return false;
+			}
+			const existingFormsBlocks = getInnerBlocksbyNameAttr(
+				blocks,
+				'gutena/existing-forms'
+			);
+			return (
+				! gfIsEmpty( existingFormsBlocks ) &&
+				existingFormsBlocks.length > 0
+			);
+		},
+		[ clientId ]
+	);
+
+	//Template
+	const TEMPLATE =
+		gfIsEmpty( variations ) || gfIsEmpty( variations[ 0 ].innerBlocks )
+			? [
+					[
+						'gutena/text-field',
+						{
+							nameAttr: 'f_0',
+							isRequired: true,
+							fieldName: __( 'Name', 'gutena-forms' ),
+							fieldType: 'text',
+							placeholder: __( 'Enter your name', 'gutena-forms' ),
+						},
+					],
+			  ]
+			: variations[ 0 ].innerBlocks;
+
+	//Form Styles : local css variable for forms inner blocks styles
+	useEffect( () => {
+		let shouldRun = true;
+		if ( shouldRun ) {
+			let newFormCss = ` .${ formNameClass() } {
+				${
+					gfIsEmpty( labelColor )
+						? ''
+						: '--wp--gutena-forms--label-color:' + labelColor + ';'
+				}
+				${
+					gfIsEmpty( placeholderColor )
+						? ''
+						: '--wp--gutena-forms--placeholder-color:' +
+						  placeholderColor +
+						  ';'
+				}
+				${
+					gfIsEmpty( inputBgColor )
+						? ''
+						: '--wp--gutena-forms--input-bg-color:' +
+						  inputBgColor +
+						  ';'
+				}
+				${
+					gfIsEmpty( inputBorderColor )
+						? ''
+						: '--wp--gutena-forms--input-border-color:' +
+						  inputBorderColor +
+						  ';'
+				}
+				${
+					gfIsEmpty( inputFocusBorderColor )
+						? ''
+						: '--wp--gutena-forms--input-focus-border-color:' +
+						  inputFocusBorderColor +
+						  ';'
+				}
+				${
+					gfIsEmpty( labelTypography?.fontFamily )
+						? ''
+						: '--wp--gutena-forms--label-font-family:' +
+						  labelTypography?.fontFamily +
+						  ';'
+				}
+				${
+					gfIsEmpty( labelTypography )
+						? ''
+						: '--wp--gutena-forms--label-font-size:' +
+						  labelTypography?.fontSize +
+						  ';'
+				}
+				${
+					gfIsEmpty( labelTypography )
+						? ''
+						: '--wp--gutena-forms--label-line-height:' +
+						  labelTypography?.lineHeight +
+						  ';'
+				}
+				${
+					gfIsEmpty( labelTypography )
+						? ''
+						: '--wp--gutena-forms--label-font-weight:' +
+						  labelTypography?.fontWeight +
+						  ';'
+				}
+				${
+					gfIsEmpty( placeholderTypography?.fontFamily )
+						? ''
+						: '--wp--gutena-forms--placeholder-font-family:' +
+						  placeholderTypography?.fontFamily +
+						  ';'
+				}
+				${
+					gfIsEmpty( placeholderTypography )
+						? ''
+						: '--wp--gutena-forms--placeholder-font-size:' +
+						  placeholderTypography?.fontSize +
+						  ';'
+				}
+				${
+					gfIsEmpty( placeholderTypography )
+						? ''
+						: '--wp--gutena-forms--placeholder-line-height:' +
+						  placeholderTypography?.lineHeight +
+						  ';'
+				}
+				${
+					gfIsEmpty( placeholderTypography )
+						? ''
+						: '--wp--gutena-forms--placeholder-font-weight:' +
+						  placeholderTypography?.fontWeight +
+						  ';'
+				}
+				${
+					gfIsEmpty( inputBorderWidth )
+						? ''
+						: '--wp--gutena-forms--input-border-width:' +
+						  inputBorderWidth +
+						  ';'
+				}
+				${
+					gfIsEmpty( inputBorderRadius )
+						? ''
+						: '--wp--gutena-forms--input-border-radius:' +
+						  inputBorderRadius +
+						  ';'
+				}
+				${
+					gfIsEmpty( labelColor )
+						? ''
+						: '--wp--gutena-forms--label-color:' + labelColor + ';'
+				}
+				${
+					gfIsEmpty( labelColor )
+						? ''
+						: '--wp--gutena-forms--label-color:' + labelColor + ';'
+				}
+
+				--wp--style--block-gap:${
+					'undefined' === typeof style?.spacing?.blockGap
+						? '2em'
+						: style?.spacing?.blockGap
+				};
+			}
+
+
+			${
+				gfIsEmpty( style?.spacing?.blockGap )
+					? ''
+					: `.editor-styles-wrapper .${ formNameClass() } > .block-editor-inner-blocks > .block-editor-block-list__layout > * + * {
+						margin-block-start: ${ style?.spacing?.blockGap };
+						margin-block-end: 0;
+					}
+					`
+			}
+
+
+			 .${ formNameClass() } .wp-block-gutena-field-group {--wp--style--block-gap:${
+				'undefined' === typeof inputLabelGap ? '0.5em' : inputLabelGap
+			};}
+			`;
+
+			newFormCss = newFormCss
+				.replaceAll( '\n', ' ' )
+				.replaceAll( '\t', '    ' );
+			//Set Form Styles
+			setAttributes( { formStyle: newFormCss } );
+		}
+
+		//cleanup
+		return () => {
+			shouldRun = false;
+		};
+	}, [
+		formName,
+		inputLabelGap,
+		inputBgColor,
+		inputBorderWidth,
+		inputBorderRadius,
+		inputBorderColor,
+		inputFocusBorderColor,
+		labelTypography,
+		labelColor,
+		placeholderTypography,
+		placeholderColor,
+		style,
+	] );
+
+	const formNameClass = () => {
+		return (
+			'gutena-forms-' +
+			( 'undefined' === typeof formName || null === formName
+				? 'contact-form'
+				: formName.toLowerCase().replace( / /g, '-' ) )
+		);
+	};
+
+	//Save Form Classnames for gutena forms block
+	useEffect( () => {
+		let shouldRunFormClassnames = true;
+		if ( shouldRunFormClassnames ) {
+			let formClassName = formNameClass();
+			formClassName += ' ' + formID;
+			formClassName += showLabel ? '' : ' not-show-form-labels';
+			formClassName += inputBottomBorderOnly
+				? ' input-box-border-bottom-only'
+				: '';
+			formClassName += afterSubmitHide ? ' hide-form-after-submit' : '';
+			formClassName += afterSubmitAction
+				? ' after_submit_' + afterSubmitAction
+				: '';
+			formClassName += gfIsEmpty( labelTypography?.fontFamily )
+				? ''
+				: ' has-label-font-family';
+			formClassName += gfIsEmpty( placeholderTypography?.fontFamily )
+				? ''
+				: ' has-placeholder-font-family';
+			setAttributes( { formClasses: formClassName } );
+		}
+
+		//cleanup
+		return () => {
+			shouldRunFormClassnames = false;
+		};
+	}, [
+		showLabel,
+		inputBottomBorderOnly,
+		formName,
+		formID,
+		afterSubmitHide,
+		afterSubmitAction,
+		labelTypography,
+		placeholderTypography,
+	] );
+
+	const PRO_STANDALONE_BLOCK_NAMES = [
+		'gutena/url-field',
+		'gutena/phone-field',
+		'gutena/password-field',
+		'gutena/hidden-field',
+		'gutena/date-field',
+		'gutena/time-field',
+		'gutena/country-field',
+		'gutena/state-field',
+		'gutena/file-upload-field',
+		'gutena/rating-field',
+	];
+
+	const allowedProBlocks =
+		typeof gutenaFormsBlock !== 'undefined' && gutenaFormsBlock?.is_pro
+			? applyFilters(
+					'gutena_forms__allowed_inner_blocks',
+					PRO_STANDALONE_BLOCK_NAMES
+			  )
+			: [];
+
+	const ALLOWED_BLOCKS = [
+		'core/columns',
+		'core/group',
+		'core/image',
+		'core/paragraph',
+		'gutena/text-field',
+		'gutena/optin-field',
+		'gutena/dropdown-field',
+		'gutena/email-field',
+		'gutena/number-field',
+		'gutena/textarea-field',
+		'gutena/range-field',
+		'gutena/radio-field',
+		'gutena/checkbox-field',
+		'core/buttons',
+		'gutena/form-confirm-msg',
+		'gutena/form-error-msg',
+		...allowedProBlocks,
+	];
+
+	const blockProps = useBlockProps( {
+		className: formClasses,
+	} );
+
+	let showFormNameField = isGutenaFormsPostType ? { display: 'none' } : {};
+
+	const formConfirmationLegacyAttrs = {
+		formID,
+		afterSubmitAction,
+		afterSubmitHide,
+		redirectUrl,
+	};
+
+	const { contextValue: formConfirmationContextValue } =
+		useFormConfirmationModal( settings, setAttributes, formConfirmationLegacyAttrs );
+
+	return (
+		<FormConfirmationEditorContext.Provider
+			value={ formConfirmationContextValue }
+		>
+			<style>{ formStyle }</style>
+			{ ! hasExistingFormsBlock && (
+				<InspectorControls>
+					<PanelBody title="Form settings" initialOpen={ true }>
+						<TextControl
+							label={ __( 'Form name', 'gutena-forms' ) }
+							value={ formName }
+							style={ showFormNameField }
+							onChange={ ( formName ) =>
+								setAttributes( { formName } )
+							}
+						/>
+						<ToggleControl
+							label={ __( 'Show label', 'gutena-forms' ) }
+							help={
+								showLabel
+									? __(
+											'Toggle to hide input label',
+											'gutena-forms'
+									  )
+									: __(
+											'Toggle to show input label',
+											'gutena-forms'
+									  )
+							}
+							checked={ showLabel }
+							onChange={ ( showLabel ) =>
+								setAttributes( { showLabel } )
+							}
+						/>
+						<p>
+							<span className="block-editor-block-card__title">
+								{ __( 'Note : ', 'gutena-forms' ) }
+							</span>
+							<span className="gf-text-muted">
+								<span>
+									{ __(
+										'To reuse this form, please make it a ',
+										'gutena-forms'
+									) }
+								</span>
+								<a
+									href="https://gutenaforms.com/reuse-gutena-forms-on-multiple-pages?utm_source=plugin&utm_medium=in-plugin&utm_campaign=docs&utm_content=editor_synced-patterns"
+									target="_blank"
+								>
+									{ __( 'Synced Patterns', 'gutena-forms' ) }
+								</a>
+								<span>
+									{ __(
+										' ( Reusable Block ). Avoid copying or duplicating this block.',
+										'gutena-forms'
+									) }
+								</span>
+							</span>
+						</p>
+					</PanelBody>
+
+				<GoogleRecaptchaSettings
+					setAttributes={ setAttributes }
+					recaptcha={ recaptcha }
+				/>
+
+				<CloudflareSettings
+					setAttributes={ setAttributes }
+					cloudflareTurnstile={ cloudflareTurnstile }
+				/>
+
+				<HoneypotSettings
+					setAttributes={ setAttributes }
+					honeypot={ honeypot }
+				/>
+
+					<PanelColorSettings
+						title={ __( 'Form colors', 'gutena-forms' ) }
+						colorSettings={ [
+							{
+								value: labelColor,
+								onChange: ( labelColor ) =>
+									setAttributes( { labelColor } ),
+								label: __( 'Label color', 'gutena-forms' ),
+								disableCustomColors: false,
+							},
+							{
+								value: placeholderColor,
+								onChange: ( placeholderColor ) =>
+									setAttributes( { placeholderColor } ),
+								label: __(
+									'Placeholder color',
+									'gutena-forms'
+								),
+								disableCustomColors: false,
+							},
+							{
+								value: inputBgColor,
+								onChange: ( inputBgColor ) =>
+									setAttributes( { inputBgColor } ),
+								label: __(
+									'Input box background color',
+									'gutena-forms'
+								),
+								disableCustomColors: false,
+							},
+							{
+								value: inputBorderColor,
+								onChange: ( inputBorderColor ) =>
+									setAttributes( { inputBorderColor } ),
+								label: __(
+									'Input box border color',
+									'gutena-forms'
+								),
+								disableCustomColors: false,
+							},
+							{
+								value: inputFocusBorderColor,
+								onChange: ( inputFocusBorderColor ) =>
+									setAttributes( { inputFocusBorderColor } ),
+								label: __(
+									'Input box on focus border color',
+									'gutena-forms'
+								),
+								disableCustomColors: false,
+							},
+						] }
+						enableAlpha={ true }
+					/>
+					{ showLabel ? (
+						<ToolsPanel
+							label={ __( 'Label typography', 'gutena-forms' ) }
+							resetAll={ () =>
+								setAttributes( {
+									labelTypography: {
+										...labelTypography,
+										fontSize: undefined,
+										lineHeight: undefined,
+										fontWeight: undefined,
+										fontFamily: undefined,
+									},
+								} )
+							}
+						>
+							<ToolsPanelItem
+								hasValue={ () =>
+									!! labelTypography?.fontFamily
+								}
+								label={ __( 'Font Family' ) }
+								onDeselect={ () =>
+									setAttributes( {
+										labelTypography: {
+											...labelTypography,
+											fontFamily: undefined,
+										},
+									} )
+								}
+							>
+								{ hasfontFamilies && (
+									<FontFamilyControl
+										fontFamilies={ fontFamiliesList }
+										value={ labelTypography?.fontFamily }
+										onChange={ ( fontFamily ) =>
+											setAttributes( {
+												labelTypography: {
+													...labelTypography,
+													fontFamily: fontFamily,
+												},
+											} )
+										}
+										size="__unstable-large"
+										__nextHasNoMarginBottom
+									/>
+								) }
+							</ToolsPanelItem>
+
+							<ToolsPanelItem
+								hasValue={ () => !! labelTypography?.fontSize }
+								label={ __( 'Font size' ) }
+								onDeselect={ () =>
+									setAttributes( {
+										labelTypography: {
+											...labelTypography,
+											fontSize: undefined,
+										},
+									} )
+								}
+							>
+								<FontSizePicker
+									onChange={ ( fontSize ) =>
+										setAttributes( {
+											labelTypography: {
+												...labelTypography,
+												fontSize: fontSize,
+											},
+										} )
+									}
+									value={ labelTypography?.fontSize }
+									withReset={ false }
+									__nextHasNoMarginBottom
+								/>
+							</ToolsPanelItem>
+
+							<ToolsPanelItem
+								className="single-column"
+								hasValue={ () =>
+									!! labelTypography?.lineHeight
+								}
+								label={ __( 'Line height' ) }
+								onDeselect={ () =>
+									setAttributes( {
+										labelTypography: {
+											...labelTypography,
+											lineHeight: undefined,
+										},
+									} )
+								}
+							>
+								<LineHeightControl
+									__unstableInputWidth="100%"
+									__nextHasNoMarginBottom={ true }
+									value={ labelTypography?.lineHeight }
+									onChange={ ( lineHeight ) =>
+										setAttributes( {
+											labelTypography: {
+												...labelTypography,
+												lineHeight: lineHeight,
+											},
+										} )
+									}
+								/>
+							</ToolsPanelItem>
+
+							<ToolsPanelItem
+								hasValue={ () =>
+									!! labelTypography?.fontWeight
+								}
+								label={ __( 'Font weight' ) }
+								onDeselect={ () =>
+									setAttributes( {
+										labelTypography: {
+											...labelTypography,
+											fontWeight: undefined,
+										},
+									} )
+								}
+							>
+								<RangeControl
+									label={ __(
+										'Font weight',
+										'gutena-forms'
+									) }
+									value={ labelTypography?.fontWeight }
+									onChange={ ( fontWeight ) =>
+										setAttributes( {
+											labelTypography: {
+												...labelTypography,
+												fontWeight: fontWeight,
+											},
+										} )
+									}
+									min={ 100 }
+									max={ 900 }
+									step={ 100 }
+								/>
+							</ToolsPanelItem>
+						</ToolsPanel>
+					) : (
+						''
+					) }
+					<ToolsPanel
+						label={ __( 'Placeholder typography', 'gutena-forms' ) }
+						resetAll={ () =>
+							setAttributes( {
+								placeholderTypography: {
+									...placeholderTypography,
+									fontSize: undefined,
+									lineHeight: undefined,
+									fontWeight: undefined,
+									fontFamily: undefined,
+								},
+							} )
+						}
+					>
+						<ToolsPanelItem
+							hasValue={ () =>
+								!! placeholderTypography?.fontFamily
+							}
+							label={ __( 'Font Family' ) }
+							onDeselect={ () =>
+								setAttributes( {
+									placeholderTypography: {
+										...placeholderTypography,
+										fontFamily: undefined,
+									},
+								} )
+							}
+						>
+							{ hasfontFamilies && (
+								<FontFamilyControl
+									fontFamilies={ fontFamiliesList }
+									value={ placeholderTypography?.fontFamily }
+									onChange={ ( fontFamily ) =>
+										setAttributes( {
+											placeholderTypography: {
+												...placeholderTypography,
+												fontFamily: fontFamily,
+											},
+										} )
+									}
+									size="__unstable-large"
+									__nextHasNoMarginBottom
+								/>
+							) }
+						</ToolsPanelItem>
+
+						<ToolsPanelItem
+							hasValue={ () =>
+								!! placeholderTypography?.fontSize
+							}
+							label={ __( 'Font size' ) }
+							onDeselect={ () =>
+								setAttributes( {
+									placeholderTypography: {
+										...placeholderTypography,
+										fontSize: undefined,
+									},
+								} )
+							}
+						>
+							<FontSizePicker
+								onChange={ ( fontSize ) =>
+									setAttributes( {
+										placeholderTypography: {
+											...placeholderTypography,
+											fontSize: fontSize,
+										},
+									} )
+								}
+								value={ placeholderTypography?.fontSize }
+								withReset={ false }
+								__nextHasNoMarginBottom
+							/>
+						</ToolsPanelItem>
+
+						<ToolsPanelItem
+							className="single-column"
+							hasValue={ () =>
+								!! placeholderTypography?.lineHeight
+							}
+							label={ __( 'Line height' ) }
+							onDeselect={ () =>
+								setAttributes( {
+									placeholderTypography: {
+										...placeholderTypography,
+										lineHeight: undefined,
+									},
+								} )
+							}
+						>
+							<LineHeightControl
+								__unstableInputWidth="100%"
+								__nextHasNoMarginBottom={ true }
+								value={ placeholderTypography?.lineHeight }
+								onChange={ ( lineHeight ) =>
+									setAttributes( {
+										placeholderTypography: {
+											...placeholderTypography,
+											lineHeight: lineHeight,
+										},
+									} )
+								}
+							/>
+						</ToolsPanelItem>
+
+						<ToolsPanelItem
+							hasValue={ () =>
+								!! placeholderTypography?.fontWeight
+							}
+							label={ __( 'Font weight' ) }
+							onDeselect={ () =>
+								setAttributes( {
+									placeholderTypography: {
+										...placeholderTypography,
+										fontWeight: undefined,
+									},
+								} )
+							}
+						>
+							<RangeControl
+								label={ __( 'Font weight', 'gutena-forms' ) }
+								value={ placeholderTypography?.fontWeight }
+								onChange={ ( fontWeight ) =>
+									setAttributes( {
+										placeholderTypography: {
+											...placeholderTypography,
+											fontWeight: fontWeight,
+										},
+									} )
+								}
+								min={ 100 }
+								max={ 900 }
+								step={ 100 }
+							/>
+						</ToolsPanelItem>
+					</ToolsPanel>
+					<PanelBody
+						title="Input settings"
+						className="gutena-forms-panel"
+						initialOpen={ false }
+					>
+						<RangeControlUnit
+							rangeLabel={ __( 'Label gap', 'gutena-forms' ) }
+							attrValue={ inputLabelGap }
+							onChangeFunc={ ( inputLabelGap ) =>
+								setAttributes( { inputLabelGap } )
+							}
+							rangeMin={ 0 }
+							rangeMax={ {
+								px: 200,
+								em: 10,
+								rem: 5,
+							} }
+							rangeStep={ 1 }
+						/>
+
+						<RangeControlUnit
+							rangeLabel={ __( 'Border width', 'gutena-forms' ) }
+							attrValue={ inputBorderWidth }
+							onChangeFunc={ ( inputBorderWidth ) =>
+								setAttributes( { inputBorderWidth } )
+							}
+							rangeMin={ 1 }
+							rangeMax={ {
+								px: 200,
+								em: 10,
+								rem: 5,
+							} }
+							rangeStep={ 1 }
+						/>
+
+						<RangeControlUnit
+							rangeLabel={ __( 'Border radius', 'gutena-forms' ) }
+							attrValue={ inputBorderRadius }
+							onChangeFunc={ ( inputBorderRadius ) =>
+								setAttributes( { inputBorderRadius } )
+							}
+							rangeMin={ 0 }
+							rangeMax={ {
+								px: 200,
+								em: 10,
+								rem: 5,
+							} }
+							rangeStep={ 1 }
+						/>
+
+						<PanelRow>
+							<ToggleControl
+								label={ __(
+									'Bottom border only',
+									'gutena-forms'
+								) }
+								help={
+									inputBottomBorderOnly
+										? __(
+												'Toggle to show all side border',
+												'gutena-forms'
+										  )
+										: __(
+												'Toggle to show show only bottom border',
+												'gutena-forms'
+										  )
+								}
+								checked={ inputBottomBorderOnly }
+								onChange={ ( inputBottomBorderOnly ) =>
+									setAttributes( { inputBottomBorderOnly } )
+								}
+							/>
+						</PanelRow>
+					</PanelBody>
+					<EmailNotificationsSettings
+						settings={ settings }
+						setAttributes={ setAttributes }
+						legacyAttrs={ {
+							formID,
+							emailNotifyAdmin,
+							adminEmails,
+							adminEmailSubject,
+							adminEmailTemplate,
+							emailFromName,
+							replyToName,
+							replyToLastName,
+						} }
+						formFields={ formFields }
+						textFieldOptions={ textFieldOptions }
+					/>
+					<FormConfirmationSettings />
+
+				<ValidationMessagesSettings
+					setAttributes={ setAttributes }
+					messages={ messages }
+				/>
+				</InspectorControls>
+			) }
+			{ hasInnerBlocks ? (
+				<form
+					method="post"
+					encType="multipart/form-data"
+					{ ...blockProps }
+				>
+					<div style={ { padding: '0 15px' } }>
+						<input type="hidden" name="formid" value={ formID } />
+						<InnerBlocks
+							template={ TEMPLATE }
+							allowedBlocks={ ALLOWED_BLOCKS }
+						/>
+					</div>
+				</form>
+			) : (
+				<Placeholder { ...props } />
+			) }
+		</FormConfirmationEditorContext.Provider>
+	);
+}
